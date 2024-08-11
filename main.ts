@@ -1,6 +1,6 @@
 async function main() {
-  const adapter: GPUAdapter = <GPUAdapter>await navigator.gpu?.requestAdapter();
-  const device: GPUDevice = <GPUDevice>await adapter?.requestDevice();
+  const adapter: GPUAdapter | null = await navigator.gpu?.requestAdapter();
+  const device: GPUDevice | undefined = await adapter?.requestDevice();
   if (!device) {
     fail("need a browser that supports WebGPU");
     return;
