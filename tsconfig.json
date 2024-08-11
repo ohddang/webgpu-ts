@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2020", "DOM"],
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "removeComments": true, // 주석 제거
+    "downlevelIteration": true, // 비동기 반복문 지원
+    "sourceMap": true, // 소스 맵 생성
+
+    /* types */
+    "typeRoots": ["./node_modules/@types", "./node_modules/@webgpu/types"],
+    "outDir": "./dist"
+  }
+}
