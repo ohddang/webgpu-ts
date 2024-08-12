@@ -1,28 +1,40 @@
+const rand = (min?: number, max?: number): number => {
+  if (min === undefined) {
+    min = 0;
+    max = 1;
+  } else if (max === undefined) {
+    max = min;
+    min = 0;
+  }
+  return min + Math.random() * (max - min);
+};
+
 async function main() {
-  const adapter: GPUAdapter | null = await navigator.gpu?.requestAdapter();
-  const device: GPUDevice | undefined = await adapter?.requestDevice();
+  const adapter = await navigator.gpu?.requestAdapter();
+  const device = await adapter?.requestDevice();
   if (!device) {
     fail("need a browser that supports WebGPU");
     return;
   }
 
-  // Get a WebGPU context from the canvas and configure it
-  const canvas = document.querySelector("canvas");
-  const context: GPUCanvasContext = <GPUCanvasContext>canvas?.getContext("webgpu");
-  const presentationFormat: GPUTextureFormat = <GPUTextureFormat>navigator.gpu.getPreferredCanvasFormat();
-  if (!context) {
-    fail("failed to get WebGPU context");
-    return;
-  }
-
+  const canvas = document.querySelector("canvas") as HTMLCanvasElement;
+  const context = canvas.getContext("webgpu") as GPUCanvasContext;
+  const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
   context.configure({
     device,
     format: presentationFormat,
   });
 
-  const vertexShader: GPUShaderModule = device.createShaderModule({
-    label: "our hardcoded red triangle vertex shaders",
+  const module = device.createShaderModule({
     code: `
+      struct OurStruct {
+        color: vec4f,
+        scale: vec2f,
+        offset: vec2f,
+      };
+
+      @group(0) @binding(0) var<uniform> ourStruct: OurStruct;
+
       @vertex fn vs(
         @builtin(vertex_index) vertexIndex : u32
       ) -> @builtin(position) vec4f {
@@ -32,37 +44,77 @@ async function main() {
           vec2f( 0.5, -0.5)   // bottom right
         );
 
-        return vec4f(pos[vertexIndex], 0.0, 1.0);
+        return vec4f(
+          pos[vertexIndex] * ourStruct.scale + ourStruct.offset, 0.0, 1.0);
       }
-    `,
-  });
 
-  const fragmentShader: GPUShaderModule = device.createShaderModule({
-    label: "our hardcoded red triangle fragment shaders",
-    code: `
       @fragment fn fs() -> @location(0) vec4f {
-        return vec4f(1, 0, 0, 1);
+        return ourStruct.color;
       }
     `,
   });
 
   const pipeline = device.createRenderPipeline({
-    label: "our hardcoded red triangle pipeline",
+    label: "multiple uniforms",
     layout: "auto",
     vertex: {
-      module: vertexShader,
+      module,
+      entryPoint: "vs",
     },
     fragment: {
-      module: fragmentShader,
+      module,
+      entryPoint: "fs",
       targets: [{ format: presentationFormat }],
     },
   });
+
+  const uniformBufferSize =
+    4 * 4 + // color is 4 32bit floats (4bytes each)
+    2 * 4 + // scale is 2 32bit floats (4bytes each)
+    2 * 4; // offset is 2 32bit floats (4bytes each)
+
+  const kColorOffset = 0;
+  const kScaleOffset = 4;
+  const kOffsetOffset = 6;
+
+  const kNumObjects = 100;
+  const objectInfos: {
+    scale: number;
+    uniformBuffer: GPUBuffer;
+    uniformValues: Float32Array;
+    bindGroup: GPUBindGroup;
+  }[] = [];
+
+  for (let i = 0; i < kNumObjects; ++i) {
+    const uniformBuffer = device.createBuffer({
+      label: `uniforms for obj: ${i}`,
+      size: uniformBufferSize,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const uniformValues = new Float32Array(uniformBufferSize / 4);
+    uniformValues.set([rand(), rand(), rand(), 1], kColorOffset); // set the color
+    uniformValues.set([rand(-0.9, 0.9), rand(-0.9, 0.9)], kOffsetOffset); // set the offset
+
+    const bindGroup = device.createBindGroup({
+      label: `bind group for obj: ${i}`,
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
+    });
+
+    objectInfos.push({
+      scale: rand(0.2, 0.5),
+      uniformBuffer,
+      uniformValues,
+      bindGroup,
+    });
+  }
 
   const renderPassDescriptor: GPURenderPassDescriptor = {
     label: "our basic canvas renderPass",
     colorAttachments: [
       {
-        view: context.getCurrentTexture().createView(),
+        view: undefined as unknown as GPUTextureView, // to be filled out when we render
         clearValue: [0.3, 0.3, 0.3, 1],
         loadOp: "clear",
         storeOp: "store",
@@ -71,27 +123,41 @@ async function main() {
   };
 
   function render() {
-    // Get the current texture from the canvas context and
-    // set it as the texture to render to.
+    renderPassDescriptor.colorAttachments[0].view = context.getCurrentTexture().createView();
 
-    // make a command encoder to start encoding commands
-    const encoder = device?.createCommandEncoder({ label: "our encoder" });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginRenderPass(renderPassDescriptor);
+    pass.setPipeline(pipeline);
 
-    // make a render pass encoder to encode render specific commands
-    const pass = encoder?.beginRenderPass(renderPassDescriptor);
-    pass?.setPipeline(pipeline);
-    pass?.draw(3); // call our vertex shader 3 times.
-    pass?.end();
+    const aspect = canvas.width / canvas.height;
 
-    const commandBuffer = encoder?.finish();
-    if (commandBuffer) device?.queue.submit([commandBuffer]);
+    for (const { scale, bindGroup, uniformBuffer, uniformValues } of objectInfos) {
+      uniformValues.set([scale / aspect, scale], kScaleOffset); // set the scale
+      device.queue.writeBuffer(uniformBuffer, 0, uniformValues);
+
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(3); // call our vertex shader 3 times
+    }
+    pass.end();
+
+    const commandBuffer = encoder.finish();
+    device.queue.submit([commandBuffer]);
   }
 
-  render();
+  const observer = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const canvas = entry.target as HTMLCanvasElement;
+      const width = entry.contentBoxSize[0].inlineSize;
+      const height = entry.contentBoxSize[0].blockSize;
+      canvas.width = Math.max(1, Math.min(width, device.limits.maxTextureDimension2D));
+      canvas.height = Math.max(1, Math.min(height, device.limits.maxTextureDimension2D));
+      render();
+    }
+  });
+  observer.observe(canvas);
 }
 
 function fail(msg: string) {
-  // eslint-disable-next-line no-alert
   alert(msg);
 }
 
